@@ -115,29 +115,58 @@ A full-stack web application for exploring and understanding Go codebases throug
 
 **1. Generate the CPG Database**
 
-```bash
-# Linux/Mac
-chmod +x generate-db.sh
-./generate-db.sh
+From the assignment root directory (where `main.go` and the Go submodules live), build the generator and produce the database:
 
-# Windows
-generate-db.bat
+```bash
+# Build the CPG generator
+go build -o cpg-gen .
+
+# Download the 4th module (Alertmanager)
+git clone --depth 1 https://github.com/prometheus/alertmanager.git
+
+# Initialize submodules if not already done
+git submodule update --init --force --recursive
+
+# Generate the database (~900MB, takes several minutes)
+./cpg-gen \
+  -modules "./client_golang:github.com/prometheus/client_golang:client_golang,./prometheus-adapter:sigs.k8s.io/prometheus-adapter:adapter,./alertmanager:github.com/prometheus/alertmanager:alertmanager" \
+  ./prometheus \
+  cpg.db
 ```
 
-This script:
-- Initializes git submodules (Prometheus, client_golang, prometheus-adapter)
-- Downloads the 4th module (Alertmanager)
-- Builds the CPG generator
-- Generates the ~900MB cpg.db database
+> **Windows:** Use `go build -o cpg-gen.exe .` and `cpg-gen.exe` instead.
 
-**2. Start the Application**
+**2. Clone this repo alongside the generated database**
+
+```
+assignment-root/          ← where you ran cpg-gen
+├── cpg.db                ← generated database
+├── prometheus/           ← submodule
+├── client_golang/        ← submodule
+├── cpg-explorer/         ← THIS REPO (clone here)
+│   ├── docker-compose.yml
+│   ├── backend/
+│   └── frontend/
+```
+
+```bash
+git clone https://github.com/StupidNinja/cpg-explorer.git
+```
+
+**3. Start the Application**
 
 ```bash
 cd cpg-explorer
 docker compose up
 ```
 
-**3. Access the Application**
+The `docker-compose.yml` mounts `../cpg.db` (the parent directory) into the backend container. If your `cpg.db` is elsewhere, set the `CPG_DB_PATH` environment variable:
+
+```bash
+CPG_DB_PATH=/path/to/cpg.db docker compose up
+```
+
+**4. Access the Application**
 
 Open your browser to: **http://localhost**
 

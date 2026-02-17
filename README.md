@@ -80,29 +80,13 @@ A full-stack web application for exploring and understanding Go codebases throug
 
 ### Key Design Decisions
 
-1. **React Flow over Cytoscape.js**
-   - More modern, React-native API
-   - Better TypeScript support
-   - Easier custom node implementation
-   - Simpler integration with React hooks
+See the detailed [Decisions, Trade-offs & Rationale](#-decisions-trade-offs--rationale) section below for full reasoning. Summary:
 
-2. **better-sqlite3 over async libraries**
-   - Synchronous API simplifies error handling in NestJS
-   - Fastest SQLite implementation for Node.js
-   - Perfect for read-only workloads
-   - Direct prepared statement support
-
-3. **Focused Subgraphs**
-   - Limit to 60 nodes per view prevents performance issues
-   - BFS ensures relevant nodes are included
-   - Interactive navigation for deeper exploration
-   - Better UX than rendering entire 555k node graph
-
-4. **Monaco Editor**
-   - Industry-standard code editor
-   - Go syntax support out of the box
-   - Familiar interface for developers
-   - Minimal configuration needed
+1. **React Flow** — React-native graph library; nodes are React components enabling rich custom `FunctionNode` cards
+2. **better-sqlite3** — Synchronous, fastest Node.js SQLite driver; ideal for read-only single-user workloads
+3. **Bounded BFS (60 nodes max)** — Keeps subgraphs cognitively manageable and renders sub-100ms
+4. **Multi-edge overlay** — Stable node layout when toggling edge types; avoids disorienting reflows
+5. **Monaco Editor** — VS Code-quality Go highlighting with zero config
 
 ## 🚀 Quick Start
 
@@ -305,28 +289,55 @@ cpg-explorer/
 | **Schema Exploration** | Insights dashboard with 8 visualizations, edge/node distributions, complexity analysis, findings drill-down, error chains | 10% |
 | **UI/UX** | Tailwind design, Explorer/Insights tabs, loading states, empty states, breadcrumbs, navigation history | 10% |
 
-## 🔍 Trade-offs & Decisions
+## 🔍 Decisions, Trade-offs & Rationale
 
-### What Went Well
-- **Full TypeScript**: End-to-end type safety reduced bugs
-- **React Flow**: Easy to implement, great DX, performant
-- **Docker Compose**: True one-command deployment
-- **Focused Scope**: Call Graph Explorer is fully functional
+### Why This Tech Stack
 
-### Trade-offs Made
-- **BFS over Algorithms**: Chose simple BFS over complex graph algorithms for time constraint
-- **Client-Side Layout**: React Flow handles layout instead of server-side algorithm
-- **Read-Only**: Focused on exploration, not graph manipulation
-- **Pre-computed Dashboard Tables**: Leveraged CPG generator's pre-computed analytics tables for instant dashboard loading
+| Choice | Alternatives Considered | Rationale |
+|--------|------------------------|-----------|
+| **React + TypeScript** | Vue, Svelte, plain JS | React's ecosystem is the largest; TypeScript catches schema/type mismatches at compile time — critical when working against a 60+ table database whose shape I was discovering as I built |
+| **NestJS** | Express, Fastify, Hono | NestJS's module system mirrors the domain boundaries (Graph, Source, Schema, Database) and its decorator-driven DI keeps services testable without manual wiring |
+| **React Flow (@xyflow/react)** | Cytoscape.js, D3-force, vis.js, Sigma.js | React Flow treats nodes as React components, which let me build rich `FunctionNode` cards (package badge, type sig, file path) without leaving the React paradigm. Cytoscape would have required a canvas-based rendering layer and separate state sync |
+| **Monaco Editor** | CodeMirror 6, Prism.js, highlight.js | Monaco gives VS Code-quality Go highlighting and minimap for free. Heavier than CodeMirror, but since it's loaded only when viewing source (code-split via React lazy), the trade-off is acceptable |
+| **better-sqlite3** | sql.js (Wasm), sqlite3 (async), Prisma | Synchronous API eliminates callback/promise overhead for read-only workloads. On benchmarks it's 2–5× faster than the async `sqlite3` driver for sequential reads. The database is never written to at runtime, so the lack of async writes is irrelevant |
+| **TanStack Query** | SWR, Redux Toolkit Query, manual fetch | Built-in request deduplication, stale-while-revalidate, and AbortController integration. When a user rapidly clicks through functions, TanStack cancels in-flight requests automatically and serves cached results for previously visited nodes |
 
-### Future Improvements
-- Data Flow Slicer feature (backward/forward slicing)
-- Package Architecture visualization
-- Graph export to image/SVG
-- Advanced layout algorithms (Dagre, ELK)
-- Node filtering and search within graph
-- Type hierarchy exploration
-- Goroutine and channel flow visualization
+### Architectural Decisions
+
+**1. BFS with bounded depth over full-graph algorithms**
+
+The CPG contains ~1.8 million edges. Rendering even a connected component would overwhelm both the browser and the user. Instead, all graph views use BFS from a selected function with a configurable depth (1–5) and a hard cap of 60 nodes. This keeps render times under 100ms and produces subgraphs that are cognitively manageable. The downside is that long call chains are truncated — I mitigate this by letting users double-click any node to re-center the BFS.
+
+**2. Multi-edge overlay instead of multi-graph queries**
+
+When the user enables non-call edge types (dfg, cfg, cdg, ref), I don't re-run the BFS with different edge kinds. Instead, I first BFS over the selected primary edge kind to discover the function set, then run a second query to find all edges of the requested types between those discovered nodes. This "overlay" approach keeps the node set stable regardless of which edge types are toggled, avoiding disorienting layout shifts.
+
+**3. Synchronous SQLite on the server**
+
+better-sqlite3 is synchronous, meaning a long query blocks the Node.js event loop. For this use case, this is the right trade-off: every query is a read against indexed columns and completes in <50ms. If I needed to support concurrent write traffic or queries that take seconds, I'd move to a worker-thread pool or an async driver. For a single-user explorer, the simplicity and speed of synchronous access wins.
+
+**4. Pre-computed dashboard tables over runtime aggregation**
+
+The CPG generator pre-computes tables like `dashboard_edge_distribution`, `dashboard_complexity_distribution`, and `dashboard_findings_summary`. I use these directly rather than running `GROUP BY` aggregations on the 664K-row `nodes` table at request time. This gives sub-millisecond dashboard loads at the cost of data freshness — but since the database is static and read-only, freshness is irrelevant.
+
+**5. Client-side layout (React Flow auto-layout) over server-side graph layout**
+
+Server-side layout with Dagre or ELK would produce more deterministic, aesthetically optimal layouts. I chose client-side layout because it keeps the backend stateless and avoids adding a layout engine dependency to Docker. React Flow's built-in layout is adequate for the 10–60 node subgraphs this tool produces. For larger graphs (100+ nodes), server-side layout would be worth the complexity.
+
+**6. Six targeted SQLite indexes**
+
+Rather than indexing every column, I profiled the actual query patterns (BFS edge traversal, function search, node lookup by ID, edge lookup by source/target) and added exactly six indexes. This keeps the database file from bloating further while ensuring the hot-path queries hit indexed lookups. The `PRAGMA` tuning (WAL mode, 64MB cache, memory-mapped temp storage) further reduces I/O on the ~900MB file.
+
+### Trade-offs I'd Revisit With More Time
+
+| Area | Current State | What I'd Change |
+|------|--------------|-----------------|
+| **Data Flow Slicer** | Not implemented | The `backward_slice` and `forward_slice` built-in queries exist in the DB. I'd add a dedicated view that highlights the slice path overlaid on source code, line by line |
+| **Package Architecture** | Available as raw data only | The `dashboard_package_graph` table has ~170 packages and ~400 edges — perfect for a force-directed layout. I'd add a zoomable package map with drill-down |
+| **Graph Layout** | React Flow default | For deeper call chains (depth 4–5), a hierarchical Dagre layout would reduce edge crossings and make the direction of calls clearer |
+| **Search** | Name substring only | Full-text search across function signatures, file paths, and source code would be more useful. SQLite FTS5 could power this without additional infrastructure |
+| **Testing** | Manual only | I'd add Jest unit tests for the graph service BFS logic and Playwright E2E tests for the critical path (search → graph → source view) |
+| **WebSocket streaming** | REST polling | For very large subgraphs, streaming nodes incrementally via WebSocket would let the graph build up progressively instead of waiting for the full response |
 
 ## 📦 Database Schema
 
